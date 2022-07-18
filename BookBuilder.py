@@ -41,10 +41,10 @@ class BookBuilder():
             filename = f"{self.working_dir}/Chapter_{chapter}_{opening['Name']}.pgn"
             printers.append((printer, filename))
 
-            if (self.engine):    
-                self.engine.quit() # quit engine
-            if (self.workerEngineReduce.engine):
-                self.workerEngineReduce.engine.quit()
+        if (self.engine):    
+            self.engine.quit() # quit engine
+        if (self.workerEngineReduce.engine):
+            self.workerEngineReduce.engine.quit()
 
         return printers 
 
