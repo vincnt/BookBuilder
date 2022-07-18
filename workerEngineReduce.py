@@ -7,66 +7,32 @@ import scipy.stats as st
 import numpy as np
 import time
 
-from config import config 
-
 import chess
 import chess.engine
 import re
 import logging
 
-
-if (config.CAREABOUTENGINE == 1):
-    engine = chess.engine.SimpleEngine.popen_uci(config.ENGINEPATH) #WHERE THE ENGINE IS ON YOUR COMPUTER
-    engine.configure({"Hash": config.ENGINEHASH})
-    engine.configure({"Threads": config.ENGINETHREADS})
-    logging.getLogger('chess.engine').setLevel(logging.INFO)
-
-#function to calculate percentage win rates for each colour, if more than 0 games
-def calc_percs(white, black, draws):
-
-    n = white + black + draws #wins + draws after move was played
-
-    if (n > 0) and (config.DRAWSAREHALF == 0):
-        total_games = n
-        white_perc = white / n
-        black_perc = black / n
-        draw_perc = draws / n
-        return white_perc, black_perc, draw_perc, total_games
+class WorkerEngineReduce():
+    def __init__(self, config):
+        self.config = config
+        self.engine=None
+        if (config.CAREABOUTENGINE == 1):
+            self.engine = chess.engine.SimpleEngine.popen_uci(config.ENGINEPATH) #WHERE THE ENGINE IS ON YOUR COMPUTER
+            self.engine.configure({"Hash": config.ENGINEHASH})
+            self.engine.configure({"Threads": config.ENGINETHREADS})
+            logging.getLogger('chess.engine').setLevel(logging.INFO)
     
-    else:
-        if (n > 0) and (config.DRAWSAREHALF == 1):
-                total_games = n
-                white_perc = (white + (0.5 * draws)) / n
-                black_perc = (black + (0.5 *draws)) / n
-                draw_perc = draws / n
-                return white_perc, black_perc, draw_perc, total_games
-    
-        else:
-                return None, None, None, 0
+    def create_worker(self, fen, lastmove = '', san = ''):
+        wp = WorkerPlay(self.config, self.engine, fen, lastmove, san)
+        return wp
 
-
-
-
-def calc_value(winRate, gamesPlayed, playRate, san, board): # p = white/black win rate and n = total games p was played, this function calculates values used in the potentcy score of each potential move. It do
-
-    if (gamesPlayed > config.MINGAMES) and (playRate >config.MINPLAYRATE): #total games move was played must be more than min games and min perc play rate (otherwise data is bad)
-        # print("check this", np.sqrt(winRate * (1-winRate) / gamesPlayed))
-        # print ("check this",st.norm.ppf(1 - config.ALPHA/2))
-        # print ("check this",winRate - st.norm.ppf(1 - config.ALPHA/2) * np.sqrt(winRate * (1-winRate) / gamesPlayed))
-        lb_value = max(0, winRate - st.norm.ppf(1 - config.ALPHA/2) * np.sqrt(winRate * (1-winRate) / gamesPlayed)) #lower bound wr at 95% confidence interval
-        ub_value = max(0, winRate + st.norm.ppf(1 - config.ALPHA/2) * np.sqrt(winRate * (1-winRate) / gamesPlayed)) #upper bound wr at
-    else:
-        winRate = 0
-        lb_value = 0
-        ub_value = 0
-
-
-
-    return winRate, lb_value, ub_value, gamesPlayed
-
+    def quit_engine(self):
+        self.engine.quit()
 
 class WorkerPlay():
-    def __init__(self, fen, lastmove = '', san = '', ):
+    def __init__(self, config, engine, fen, lastmove = '', san = ''):
+        self.config = config
+        self.engine = engine
         self.fen = fen #fen is the game moves format needed to feed lichess api
         self.short_fen = fen[:-4]
         self.lastmove = lastmove
@@ -79,7 +45,7 @@ class WorkerPlay():
         
         self.stats = self.call_api()
         self.parse_stats()
-           
+        
     def show(self):
         try:
             print('')
@@ -93,13 +59,13 @@ class WorkerPlay():
         move = board.push_san(san)
         workerPlay = workerPlay(board.fen(), lastmove = move, san = san)
         return workerPlay
-       
+    
 #generate the Lichess API URL from config file               
     def call_api(self):
-        variant = config.VARIANT
-        speeds = config.SPEEDS
-        ratings = config.RATINGS
-        moves = config.MOVES
+        variant = self.config.VARIANT
+        speeds = self.config.SPEEDS
+        ratings = self.config.RATINGS
+        moves = self.config.MOVES
         recentGames = 0
         topGames = 0
         play = ""
@@ -136,10 +102,10 @@ class WorkerPlay():
     def parse_stats(self, move = None): #parse the stats returned by the API
 
         stats = self.stats #self.stats is what the api call returns
-        stats['white_perc'], stats['black_perc'], stats['draw_perc'], stats['total_games'] = calc_percs(stats['white'], stats['black'], stats['draws']) # base rate?? sends the whiteWin / blackWin / draw / total games move was played numbers to calculate win percentages function, and define stats
+        stats['white_perc'], stats['black_perc'], stats['draw_perc'], stats['total_games'] = self.calc_percs(stats['white'], stats['black'], stats['draws']) # base rate?? sends the whiteWin / blackWin / draw / total games move was played numbers to calculate win percentages function, and define stats
         #print(stats) #uncomment for debugging
         for m in self.stats['moves']:
-            m['white_perc'], m['black_perc'], m['draw_perc'], m['total_games'] = calc_percs(m['white'], m['black'], m['draws']) #each position iterate through all the moves to get win rate stats
+            m['white_perc'], m['black_perc'], m['draw_perc'], m['total_games'] = self.calc_percs(m['white'], m['black'], m['draws']) #each position iterate through all the moves to get win rate stats
             m['playrate'] = m['total_games'] / stats['total_games']
             #print(m) #uncomment for debugging
             #TO DO call api for each move to get real percentages and total game numbers for transposition
@@ -153,11 +119,11 @@ class WorkerPlay():
         best_move = None
         for move in self.stats['moves']: #array of all moves returned from the API as next moves in a given position.
             if self.board.turn == chess.WHITE: #if it's white to play
-                value, lb_value, ub_value, n = calc_value(move['white_perc'], move['total_games'], move['playrate'], move['san'], self.board) #sends move white win percentage and total games move was played to calculate 'potency' on confidence intervals
+                value, lb_value, ub_value, n = self.calc_value(move['white_perc'], move['total_games'], move['playrate'], move['san'], self.board) #sends move white win percentage and total games move was played to calculate 'potency' on confidence intervals
                 for_printing= ''.join([str(i) for i in ["candidate move is ", move['san'], 'lb win rate is ', "{:+.2%}".format(move['white_perc']), 'playrate ', "{:+.2%}".format(move['playrate']),"lb value ", lb_value]])
                 logging.debug(for_printing)
             else: #if it's not white it's black to play
-                value, lb_value, ub_value, n = calc_value(move['black_perc'], move['total_games'], move['playrate'], move['san'], self.board) #sends move black win percentage and total games move was played to calculate 'potency' on confidence intervals
+                value, lb_value, ub_value, n = self.calc_value(move['black_perc'], move['total_games'], move['playrate'], move['san'], self.board) #sends move black win percentage and total games move was played to calculate 'potency' on confidence intervals
                 for_printing= ''.join([str(i) for i in ["candidate move is ", move['san'], 'lb win rate is ', "{:+.2%}".format(move['black_perc']), 'playrate' , "{:+.2%}".format(move['playrate']), "lb value ", lb_value]])
                 logging.debug(for_printing)
             key = move['san']
@@ -170,14 +136,14 @@ class WorkerPlay():
         lb_potencies = {k:v['lb_value'] for k,v in moves.items()} #makes a set of lb values from potential moves picked
         #print ('continuation options and winrates - ',lb_potencies)#prints list of continuations with lower bound winrates
         
-                   
+                
         best_move = max(lb_potencies, key=lb_potencies.get) #best move is the move with the highest lower bound win rate (based on 95% confidence interval)
         potency = moves[best_move]['value'] #basic win rate
         lb_potency = moves[best_move]['lb_value']
         ub_potency = moves[best_move]['ub_value']
         n = moves[best_move]['n']
                 
-        if (config.CAREABOUTENGINE == 1) and (potency > 0) :
+        if (self.config.CAREABOUTENGINE == 1) and (potency > 0) :
 
             engineChecked = 0
             baseEval = []
@@ -202,7 +168,7 @@ class WorkerPlay():
                     # print("after push")
                     # print(board)
                     print("engine evaluating...")
-                    score = engine.analyse(board, chess.engine.Limit(depth = config.ENGINEDEPTH)) #we get engine's eval from their perspective
+                    score = self.engine.analyse(board, chess.engine.Limit(depth = self.config.ENGINEDEPTH)) #we get engine's eval from their perspective
                     # print("Their Score:", score["score"])
                     scoreString = str(score["score"])
                     # print ("Eval for them after our move", scoreString) 
@@ -234,7 +200,7 @@ class WorkerPlay():
                         engineChecked = 1
                         logging.debug(f"move is engine checked {moves[san]}")  
                     else:      
-                        if (afterMoveScore < config.SOUNDNESSLIMIT): #we throw out moves lower than our soundness limit
+                        if (afterMoveScore < self.config.SOUNDNESSLIMIT): #we throw out moves lower than our soundness limit
                             # print ("check using san as variable works", moves[san])
                             logging.debug ([str(i) for i in ["engine failed",best_move, moves[san], "eval", afterMoveScore]])
                             moves[san] = {
@@ -244,14 +210,14 @@ class WorkerPlay():
                                 , 'n': n #total games played
                             }                            
 
-                      
+                    
                         
                         else:
                             #if the move is not junk, we check further with the engine
                             
                             if not baseEval: #if we already have a base eval, we just use that one
                                 logging.debug("engine evaluating...")
-                                score = engine.analyse(board, chess.engine.Limit(depth = config.ENGINEDEPTH)) #we get engine's eval before our move from their perspective
+                                score = self.engine.analyse(board, chess.engine.Limit(depth = self.config.ENGINEDEPTH)) #we get engine's eval before our move from their perspective
                                 # print("Their Score:", score["score"])
                                 scoreString = str(score["score"])
                                 # print ("Eval for them,", scoreString) 
@@ -287,11 +253,11 @@ class WorkerPlay():
                             
                             
                                 #we check if the aftermove score is winning enough to ignore centipawns lost, or the centipawns lost is not too much. We throw out moves that are not winning enough and lose too many centipawns
-                                if (   (afterMoveScore > config.IGNORELOSSLIMIT)    or   ((afterMoveScore - baseEval) > config.MOVELOSSLIMIT)   ): 
+                                if (   (afterMoveScore > self.config.IGNORELOSSLIMIT)    or   ((afterMoveScore - baseEval) > self.config.MOVELOSSLIMIT)   ): 
 
-                                    if(afterMoveScore > (config.IGNORELOSSLIMIT + 100)): #we don't both to double check our opponents move if the eval is 100 over our ignore loss limit
-                                        lb_value = max(0, potency - st.norm.ppf(1 - config.ALPHA/2) * np.sqrt(potency * (1-potency) / gamesPlayed)) #lower bound wr at 95% confidence interval
-                                        ub_value = max(0, potency + st.norm.ppf(1 - config.ALPHA/2) * np.sqrt(potency * (1-potency) / gamesPlayed)) #upper bound wr at
+                                    if(afterMoveScore > (self.config.IGNORELOSSLIMIT + 100)): #we don't both to double check our opponents move if the eval is 100 over our ignore loss limit
+                                        lb_value = max(0, potency - st.norm.ppf(1 - self.config.ALPHA/2) * np.sqrt(potency * (1-potency) / gamesPlayed)) #lower bound wr at 95% confidence interval
+                                        ub_value = max(0, potency + st.norm.ppf(1 - self.config.ALPHA/2) * np.sqrt(potency * (1-potency) / gamesPlayed)) #upper bound wr at
                                         engineChecked = 1
                                         logging.debug(f"move is engine checked and far over winning margin {moves[san]}")                                        
                                         
@@ -303,13 +269,13 @@ class WorkerPlay():
                                         # print(board)
                                         
                                         #then we get the engine to reply, and check again the eval hasn't changed too much. This avoids bugs later.
-                                        #print((engine.play(board, chess.engine.Limit(depth = config.ENGINEDEPTH))))
-                                        PlayResult = engine.play(board, chess.engine.Limit(depth = config.ENGINEDEPTH)) #we get the engine to play
+                                        #print((self.engine.play(board, chess.engine.Limit(depth = self.config.ENGINEDEPTH))))
+                                        PlayResult = self.engine.play(board, chess.engine.Limit(depth = self.config.ENGINEDEPTH)) #we get the engine to play
                                         board.push(PlayResult.move) #we get engine to reply to our move, then check eval
                                         # print(board)
                                         
                                         logging.debug("engine evaluating...")
-                                        score = engine.analyse(board, chess.engine.Limit(depth = config.ENGINEDEPTH)) #we get engine's eval
+                                        score = self.engine.analyse(board, chess.engine.Limit(depth = self.config.ENGINEDEPTH)) #we get engine's eval
                                         # print("After their move pur Score:", score["score"])
                                         scoreString = str(score["score"])
                                         # print ("Eval for us,", scoreString)  
@@ -343,9 +309,9 @@ class WorkerPlay():
                                             logging.debug(f"move is engine checked {moves[san]}")                   
                                         else:      
                                             #now we check that the engine reply centipawn score was not too unsound, and either we are winning by enough to ignore losing centipawns, or that the move doesn't lose too many centipawns
-                                            if (afterEngineReply > config.SOUNDNESSLIMIT)  and     (   (afterEngineReply > config.IGNORELOSSLIMIT)    or   ((afterEngineReply - baseEval) > config.MOVELOSSLIMIT)   ): 
-                                                lb_value = max(0, potency - st.norm.ppf(1 - config.ALPHA/2) * np.sqrt(potency * (1-potency) / gamesPlayed)) #lower bound wr at 95% confidence interval
-                                                ub_value = max(0, potency + st.norm.ppf(1 - config.ALPHA/2) * np.sqrt(potency * (1-potency) / gamesPlayed)) #upper bound wr at
+                                            if (afterEngineReply > self.config.SOUNDNESSLIMIT)  and     (   (afterEngineReply > self.config.IGNORELOSSLIMIT)    or   ((afterEngineReply - baseEval) > self.config.MOVELOSSLIMIT)   ): 
+                                                lb_value = max(0, potency - st.norm.ppf(1 - self.config.ALPHA/2) * np.sqrt(potency * (1-potency) / gamesPlayed)) #lower bound wr at 95% confidence interval
+                                                ub_value = max(0, potency + st.norm.ppf(1 - self.config.ALPHA/2) * np.sqrt(potency * (1-potency) / gamesPlayed)) #upper bound wr at
                                                 engineChecked = 1
                                                 logging.debug(f"move is engine checked {moves[san]}")
                                             else:
@@ -400,16 +366,53 @@ class WorkerPlay():
             children.append(worker)
         return children
     
-    
-
 
     def find_move_tree(self): #how we return possible opponent continuations
 
         return self.stats['moves']
 
+    def calc_value(self, winRate, gamesPlayed, playRate, san, board): # p = white/black win rate and n = total games p was played, this function calculates values used in the potentcy score of each potential move. It do
+
+        if (gamesPlayed > self.config.MINGAMES) and (playRate >self.config.MINPLAYRATE): #total games move was played must be more than min games and min perc play rate (otherwise data is bad)
+            # print("check this", np.sqrt(winRate * (1-winRate) / gamesPlayed))
+            # print ("check this",st.norm.ppf(1 - self.config.ALPHA/2))
+            # print ("check this",winRate - st.norm.ppf(1 - self.config.ALPHA/2) * np.sqrt(winRate * (1-winRate) / gamesPlayed))
+            lb_value = max(0, winRate - st.norm.ppf(1 - self.config.ALPHA/2) * np.sqrt(winRate * (1-winRate) / gamesPlayed)) #lower bound wr at 95% confidence interval
+            ub_value = max(0, winRate + st.norm.ppf(1 - self.config.ALPHA/2) * np.sqrt(winRate * (1-winRate) / gamesPlayed)) #upper bound wr at
+        else:
+            winRate = 0
+            lb_value = 0
+            ub_value = 0
+
+
+
+        return winRate, lb_value, ub_value, gamesPlayed
+
+    def calc_percs(self, white, black, draws):
+
+        n = white + black + draws #wins + draws after move was played
+
+        if (n > 0) and (self.config.DRAWSAREHALF == 0):
+            total_games = n
+            white_perc = white / n
+            black_perc = black / n
+            draw_perc = draws / n
+            return white_perc, black_perc, draw_perc, total_games
+        
+        else:
+            if (n > 0) and (self.config.DRAWSAREHALF == 1):
+                    total_games = n
+                    white_perc = (white + (0.5 * draws)) / n
+                    black_perc = (black + (0.5 *draws)) / n
+                    draw_perc = draws / n
+                    return white_perc, black_perc, draw_perc, total_games
+        
+            else:
+                    return None, None, None, 0
+
     def find_potency(self): #how we return possible opponent continuations
         stats = self.stats
-        stats['white_perc'], stats['black_perc'], stats['draw_perc'], stats['total_games'] = calc_percs(stats['white'], stats['black'], stats['draws'])        
+        stats['white_perc'], stats['black_perc'], stats['draw_perc'], stats['total_games'] = self.calc_percs(stats['white'], stats['black'], stats['draws'])        
         if self.board.turn == chess.WHITE: #if we are white
             potency = stats['black_perc']
             draws = stats['draw_perc']
@@ -417,7 +420,3 @@ class WorkerPlay():
             potency = stats['white_perc']
             draws = stats['draw_perc']
         return potency, stats ['total_games'], draws
-    
-
-def quitEngine():
-    engine.quit()
